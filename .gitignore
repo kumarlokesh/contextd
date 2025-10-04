@@ -1,0 +1,87 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Docker
+.dockerignore
+
+# Backup files
+*.backup
+*.bak
+*.tmp
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Build artifacts
+dist/
+build/
+out/
+
+# Documentation build
+docs/_build/
+
+# Benchmarking results
+bench_results/
+*.bench
+
+# Profiling data
+*.prof
+*.profdata
+
+# Local configuration files (keep contextd.toml as it's likely a project config)
+local.toml
+*.local.toml
+
+# Test artifacts
+test_results/
+*.test
+
+# Temporary files
+temp/
+tmp/
+*.temp

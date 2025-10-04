@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  contextd:
+    build: .
+    container_name: contextd
+    ports:
+      - "8080:8080"
+    volumes:
+      - contextd_data:/data
+      - ./contextd.toml:/etc/contextd/contextd.toml:ro
+    environment:
+      - RUST_LOG=contextd=info,tower_http=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "contextctl", "--url", "http://localhost:8080", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: PostgreSQL backend for production
+  postgres:
+    image: postgres:15-alpine
+    container_name: contextd-postgres
+    environment:
+      POSTGRES_DB: contextd
+      POSTGRES_USER: contextd
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    profiles: ["postgres"]
+
+volumes:
+  contextd_data:
+    driver: local
+  postgres_data:
+    driver: local

@@ -1,0 +1,90 @@
+[package]
+name = "contextd"
+version = "0.1.0"
+edition = "2021"
+authors = ["contextd contributors"]
+description = "A transparent, privacy-first memory daemon for LLMs"
+license = "Apache-2.0"
+repository = "https://github.com/yourusername/contextd"
+keywords = ["llm", "memory", "search", "privacy", "daemon"]
+categories = ["api-bindings", "database", "web-programming"]
+
+[[bin]]
+name = "contextd"
+path = "src/main.rs"
+
+[[bin]]
+name = "contextctl"
+path = "src/bin/contextctl.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["macros", "tracing"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "uuid", "json"] }
+
+# Search engine
+tantivy = "0.22"
+
+# Configuration
+config = "0.14"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4.0", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# HTTP client (for CLI)
+reqwest = { version = "0.11", features = ["json"] }
+
+# Compression
+lz4_flex = "0.11"
+
+# Optional vector search dependencies
+[dependencies.qdrant-client]
+version = "1.8"
+optional = true
+
+[features]
+default = ["compression"]
+compression = []
+vector-search = ["qdrant-client"]
+postgres = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"
+futures = "0.3"
+criterion = "0.5"
+
+[[bench]]
+name = "storage_benchmark"
+harness = false
+
+[[bench]]
+name = "search_benchmark"
+harness = false
