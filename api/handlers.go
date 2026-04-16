@@ -1,0 +1,282 @@
+package api
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/kumarlokesh/contextd/store"
+)
+
+const maxBodyBytes = 1 << 20 // 1 MB
+
+// Handlers holds the dependencies for all API handlers.
+type Handlers struct {
+	store  store.Store
+	policy policyConfig
+}
+
+type policyConfig struct {
+	maxResults int
+}
+
+// NewHandlers constructs Handlers with the given store and policy settings.
+func NewHandlers(st store.Store, maxResultsPerQuery int) *Handlers {
+	if maxResultsPerQuery <= 0 {
+		maxResultsPerQuery = 100
+	}
+	return &Handlers{
+		store:  st,
+		policy: policyConfig{maxResults: maxResultsPerQuery},
+	}
+}
+
+// handleStoreChat handles POST /v1/store_chat.
+func (h *Handlers) handleStoreChat(w http.ResponseWriter, r *http.Request) {
+	var req StoreChatRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project_id is required")
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "session_id is required")
+		return
+	}
+	if len(req.Messages) == 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "messages must not be empty")
+		return
+	}
+
+	ts := time.Now().UTC()
+	if req.Timestamp != nil {
+		ts = req.Timestamp.UTC()
+	}
+
+	input := store.ChatInput{
+		ProjectID: req.ProjectID,
+		SessionID: req.SessionID,
+		Timestamp: ts,
+		Messages:  req.Messages,
+		Metadata:  req.Metadata,
+	}
+
+	chatID, err := h.store.StoreChat(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to store chat")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, StoreChatResponse{
+		ChatID:   chatID,
+		StoredAt: ts,
+	})
+}
+
+// handleConversationSearch handles POST /v1/conversation_search.
+// Until M4 lands FTS, this falls back to returning recent chats that contain
+// the query string (case-insensitive substring match).
+func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	var req SearchRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project_id is required")
+		return
+	}
+	if req.Query == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "query is required")
+		return
+	}
+
+	limit := h.policy.maxResults
+	if req.MaxResults > 0 && req.MaxResults < limit {
+		limit = req.MaxResults
+	}
+
+	// Fetch a wider candidate set to filter against.
+	candidateLimit := limit * 10
+	if candidateLimit < 100 {
+		candidateLimit = 100
+	}
+
+	chats, err := h.store.RecentChats(r.Context(), req.ProjectID, nil, candidateLimit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "search failed")
+		return
+	}
+
+	queryLower := strings.ToLower(req.Query)
+	var results []SearchResult
+	for _, c := range chats {
+		if req.TimeRange != nil {
+			if c.Timestamp.Before(req.TimeRange.Start) || c.Timestamp.After(req.TimeRange.End) {
+				continue
+			}
+		}
+		snippet := matchSnippet(c.Messages, queryLower)
+		if snippet == "" {
+			continue
+		}
+		results = append(results, SearchResult{
+			ChatID:    c.ID,
+			SessionID: c.SessionID,
+			Timestamp: c.Timestamp,
+			Snippet:   snippet,
+			Score:     1.0, // placeholder until FTS BM25 lands in M4
+		})
+		if len(results) >= limit {
+			break
+		}
+	}
+
+	queryHash := hashQuery(req.ProjectID, req.Query, req.TimeRange)
+
+	if results == nil {
+		results = []SearchResult{}
+	}
+	writeJSON(w, http.StatusOK, SearchResponse{
+		Results:   results,
+		QueryHash: queryHash,
+		TookMS:    time.Since(start).Milliseconds(),
+	})
+}
+
+// handleRecentChats handles POST /v1/recent_chats.
+func (h *Handlers) handleRecentChats(w http.ResponseWriter, r *http.Request) {
+	var req RecentChatsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project_id is required")
+		return
+	}
+
+	limit := h.policy.maxResults
+	if req.Limit > 0 && req.Limit < limit {
+		limit = req.Limit
+	}
+
+	chats, err := h.store.RecentChats(r.Context(), req.ProjectID, req.SessionID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to retrieve chats")
+		return
+	}
+	if chats == nil {
+		chats = []store.Chat{}
+	}
+
+	writeJSON(w, http.StatusOK, RecentChatsResponse{Chats: chats})
+}
+
+// handleDeleteChat handles DELETE /v1/chats/{id}.
+func (h *Handlers) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
+	chatID := chi.URLParam(r, "id")
+	projectID := r.URL.Query().Get("project_id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project_id query param is required")
+		return
+	}
+	if chatID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "chat id is required")
+		return
+	}
+
+	if err := h.store.DeleteChat(r.Context(), projectID, chatID); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to delete chat")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteProject handles DELETE /v1/projects/{id}.
+func (h *Handlers) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project id is required")
+		return
+	}
+
+	count, err := h.store.DeleteProject(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to delete project")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"project_id":    projectID,
+		"chats_deleted": count,
+	})
+}
+
+// --- helpers -----------------------------------------------------------------
+
+// decodeJSON decodes the request body into dst. On any error it writes a 400
+// and returns false.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "http: request body too large") {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrCodePayloadLimit, "request body exceeds 1MB")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON: "+msg)
+		return false
+	}
+	return true
+}
+
+// matchSnippet returns a short excerpt from the first matching message,
+// or "" if the query is not found. queryLower must already be lowercased.
+func matchSnippet(msgs []store.Message, queryLower string) string {
+	for _, m := range msgs {
+		lower := strings.ToLower(m.Content)
+		idx := strings.Index(lower, queryLower)
+		if idx == -1 {
+			continue
+		}
+		start := idx - 40
+		if start < 0 {
+			start = 0
+		}
+		end := idx + len(queryLower) + 40
+		if end > len(m.Content) {
+			end = len(m.Content)
+		}
+		snippet := m.Content[start:end]
+		if start > 0 {
+			snippet = "..." + snippet
+		}
+		if end < len(m.Content) {
+			snippet += "..."
+		}
+		return snippet
+	}
+	return ""
+}
+
+// hashQuery generates a deterministic SHA-256 hex string for audit linkage.
+func hashQuery(projectID, query string, tr *TimeRange) string {
+	h := sha256.New()
+	h.Write([]byte(projectID))
+	h.Write([]byte(query))
+	if tr != nil {
+		h.Write([]byte(tr.Start.UTC().Format(time.RFC3339)))
+		h.Write([]byte(tr.End.UTC().Format(time.RFC3339)))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+

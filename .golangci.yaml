@@ -1,0 +1,28 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - unconvert
+    - unparam
+    - noctx
+    - bodyclose
+    - contextcheck
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/kumarlokesh/contextd
+  govet:
+    enable-all: true
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

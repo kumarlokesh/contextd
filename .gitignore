@@ -1,8 +1,11 @@
-# Rust
-/target/
-**/*.rs.bk
-*.pdb
-Cargo.lock
+# Go
+bin/
+*.test
+*.out
+/vendor/
+
+# Go test cache
+testcache/
 
 # IDE and Editor files
 .vscode/
@@ -33,16 +36,9 @@ pids
 *.seed
 *.pid.lock
 
-# Coverage directory used by tools like istanbul
-coverage/
-*.lcov
-
 # Environment variables
 .env
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
 
 # Docker
 .dockerignore
@@ -52,7 +48,8 @@ coverage/
 *.bak
 *.tmp
 
-# Database files
+# Database files (runtime data only; testdata fixtures are tracked)
+data/
 *.db
 *.sqlite
 *.sqlite3
@@ -73,15 +70,13 @@ bench_results/
 *.prof
 *.profdata
 
-# Local configuration files (keep contextd.toml as it's likely a project config)
-local.toml
-*.local.toml
-
-# Test artifacts
-test_results/
-*.test
-
 # Temporary files
 temp/
 tmp/
 *.temp
+
+# golangci-lint cache
+.golangci-cache/
+
+# GoReleaser dist
+dist/

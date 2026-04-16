@@ -1,0 +1,171 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/kumarlokesh/contextd/api"
+	"github.com/kumarlokesh/contextd/config"
+	"github.com/kumarlokesh/contextd/server"
+	sqlitestore "github.com/kumarlokesh/contextd/store/sqlite"
+)
+
+// Injected at build time via -ldflags.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "contextd: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		printUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "serve":
+		return cmdServe(args[1:])
+	case "version":
+		return cmdVersion(args[1:])
+	case "init-config":
+		return cmdInitConfig(args[1:])
+	case "-h", "--help", "help":
+		printUsage()
+		return nil
+	default:
+		printUsage()
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+// cmdServe starts the HTTP daemon.
+func cmdServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	configPath := fs.String("config", "contextd.yaml", "path to config file")
+	port := fs.Int("port", 0, "override listen port (0 = use config)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: contextd serve [flags]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	logger := buildLogger()
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	if *port != 0 {
+		cfg.Server.Port = *port
+	}
+
+	// Ensure the data directory exists before opening SQLite.
+	if err := os.MkdirAll(filepath.Dir(cfg.Storage.Path), 0o755); err != nil {
+		return fmt.Errorf("creating data dir: %w", err)
+	}
+
+	st, err := sqlitestore.Open(cfg.Storage.Path)
+	if err != nil {
+		return fmt.Errorf("opening store: %w", err)
+	}
+	defer st.Close()
+
+	build := server.BuildInfo{
+		Version:   version,
+		Commit:    commit,
+		BuildDate: buildDate,
+	}
+
+	srv := server.New(cfg, logger, build)
+	srv.Routes()
+	srv.MountAPI("/v1", api.Router(st, cfg.Policy.MaxResultsPerQuery))
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	return srv.Start(ctx)
+}
+
+// cmdVersion prints build information and exits.
+func cmdVersion(args []string) error {
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: contextd version")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	fmt.Printf("version:    %s\ncommit:     %s\nbuild_date: %s\n", version, commit, buildDate)
+	return nil
+}
+
+// cmdInitConfig writes a default contextd.yaml to disk.
+func cmdInitConfig(args []string) error {
+	fs := flag.NewFlagSet("init-config", flag.ContinueOnError)
+	out := fs.String("output", "contextd.yaml", "path to write the default config")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: contextd init-config [flags]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(*out); err == nil {
+		return fmt.Errorf("file %q already exists; remove it first", *out)
+	}
+
+	data, err := yaml.Marshal(config.Default())
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+
+	if err := os.WriteFile(*out, data, 0o644); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+
+	fmt.Printf("wrote default config to %s\n", *out)
+	return nil
+}
+
+// buildLogger constructs a slog.Logger that respects the CONTEXTD_LOG_LEVEL
+// environment variable.
+func buildLogger() *slog.Logger {
+	level := slog.LevelInfo
+	if v := os.Getenv("CONTEXTD_LOG_LEVEL"); v != "" {
+		var l slog.Level
+		if err := l.UnmarshalText([]byte(v)); err == nil {
+			level = l
+		}
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, `Usage: contextd <command> [flags]
+
+Commands:
+  serve        Start the contextd HTTP daemon
+  version      Print version information
+  init-config  Write a default contextd.yaml to disk
+
+Run "contextd <command> --help" for command-specific flags.`)
+}

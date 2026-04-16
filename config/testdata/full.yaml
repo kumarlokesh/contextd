@@ -1,0 +1,23 @@
+server:
+  host: "0.0.0.0"
+  port: 7070
+
+storage:
+  type: "sqlite"
+  path: "/tmp/test.db"
+  compression: true
+
+search:
+  full_text: true
+  vector: true
+  hybrid_alpha: 0.5
+  hybrid_beta: 0.4
+  hybrid_gamma: 0.1
+
+policy:
+  default_retention_days: 30
+  max_results_per_query: 50
+
+audit:
+  enabled: false
+  retention_days: 180
