@@ -1,141 +1,178 @@
 # contextd
 
-> **A transparent, privacy-first memory daemon for LLMs - explicit retrieval, hybrid search, and auditable context management.**
+> **A transparent, privacy-first memory daemon for LLMs - explicit retrieval, hybrid search, auditable context management.**
 
-[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
+[![Go](https://img.shields.io/badge/go-1.24-00ADD8.svg)](https://golang.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Table of Contents
+## What is contextd
 
-- [contextd](#contextd)
-  - [Table of Contents](#table-of-contents)
-  - [Key Features](#key-features)
-  - [Quick Start](#quick-start)
-    - [1. Start the daemon](#1-start-the-daemon)
-    - [2. Store your first conversation](#2-store-your-first-conversation)
-    - [3. Search your memory](#3-search-your-memory)
-    - [4. View audit logs](#4-view-audit-logs)
-  - [Architecture](#architecture)
-  - [Examples](#examples)
-  - [Security \& Privacy](#security--privacy)
-  - [Development](#development)
-    - [Building from Source](#building-from-source)
-    - [Running Examples](#running-examples)
-  - [License](#license)
+contextd is a local daemon that stores and retrieves LLM conversation history. It is deliberately not a library: running as a separate process means every memory access goes through an explicit API call, is logged, and can be audited. Think `ssh-agent` for LLM memory.
 
-## Key Features
+Single binary. Single SQLite database for transcripts, full-text search, vectors, and audit log. No cloud, no telemetry.
 
-- **Privacy-First**: Local SQLite storage with optional encryption
-- **Explicit Memory**: No silent context injection - all retrieval is via API calls
-- **Hybrid Search**: Full-text (Tantivy) + optional vector search with temporal ranking
-- **Audit Trail**: Every memory access logged with timestamps and result hashes
-- **Lightweight**: Single binary daemon with REST API
-- **Local-First**: Full offline operation, optional remote deployment
+## Key features
 
-## Quick Start
+- **Explicit retrieval** - no silent context injection; your agent decides when to query memory
+- **Local-first** - SQLite on disk, full offline operation; Postgres backend _(coming in a later phase)_
+- **Hybrid search** - SQLite FTS5 (BM25) + sqlite-vec (semantic) + temporal decay, all in one database
+- **Hash-chained audit log** - every search and retrieval is recorded; the chain detects tampering _(coming in a later phase)_
+- **MCP server** - consumable by Claude Desktop, Cursor, and any MCP client _(coming in a later phase)_
+- **Privacy APIs** - export and delete by project, per-project retention _(coming in a later phase)_
 
-### 1. Start the daemon
+## Quick start
 
 ```bash
-# Clone and build
+# Build
 git clone https://github.com/kumarlokesh/contextd
 cd contextd
-cargo run -- serve
+make build
 
-# Server starts on http://127.0.0.1:8080
+# Start the daemon (config is optional; falls back to defaults)
+./bin/contextd serve
+
+# Or with a custom port
+./bin/contextd serve --port 9090
+
+# Write a default config file to disk
+./bin/contextd init-config
 ```
 
-### 2. Store your first conversation
+The daemon starts on `http://127.0.0.1:8080` by default.
+
+## REST API
+
+### Store a conversation
 
 ```bash
-# Using the CLI client
-cargo run --bin contextctl -- store \
-  --project "my-project" \
-  --session "session-123" \
-  --user "How do I learn Rust?" \
-  --assistant "Start with the Rust Book and practice with small projects!"
+curl -s -X POST http://localhost:8080/v1/store_chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "project_id": "my-project",
+    "session_id": "session-123",
+    "messages": [
+      {"role": "user",      "content": "How do I learn Go?"},
+      {"role": "assistant", "content": "Start with the Tour of Go, then write small CLI tools."}
+    ]
+  }'
+# {"chat_id":"...","stored_at":"..."}
 ```
 
-### 3. Search your memory
+### Search conversations
 
 ```bash
-# Search across all conversations
-cargo run --bin contextctl -- search \
-  --project "my-project" \
-  --query "Rust programming" \
-  --limit 5
+curl -s -X POST http://localhost:8080/v1/conversation_search \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id": "my-project", "query": "Go programming", "max_results": 5}'
+# {"results":[...],"query_hash":"...","took_ms":1}
 ```
 
-### 4. View audit logs
+### Get recent chats
 
 ```bash
-# See what memory was accessed
-cargo run --bin contextctl -- audit \
-  --project "my-project" \
-  --limit 10
+curl -s -X POST http://localhost:8080/v1/recent_chats \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id": "my-project", "limit": 20}'
+```
+
+### Delete a chat
+
+```bash
+curl -s -X DELETE 'http://localhost:8080/v1/chats/<chat_id>?project_id=my-project'
+```
+
+### Delete a project (cascading)
+
+```bash
+curl -s -X DELETE http://localhost:8080/v1/projects/my-project
+# {"project_id":"my-project","chats_deleted":42}
+```
+
+### Health and version
+
+```bash
+curl http://localhost:8080/health   # {"status":"ok","uptime_seconds":N}
+curl http://localhost:8080/version  # {"version":"...","commit":"...","build_date":"..."}
+```
+
+## Configuration
+
+```bash
+# Write defaults to contextd.yaml, then edit as needed
+./bin/contextd init-config
+```
+
+```yaml
+server:
+  host: "127.0.0.1"
+  port: 8080
+
+storage:
+  type: sqlite
+  path: ./data/contextd.db
+
+search:
+  full_text: true
+  vector: false       # sqlite-vec hybrid search coming in M5
+  hybrid_alpha: 0.5   # BM25 weight
+  hybrid_beta: 0.4    # vector weight
+  hybrid_gamma: 0.1   # temporal decay weight
+
+policy:
+  default_retention_days: 90
+  max_results_per_query: 100
+
+audit:
+  enabled: true
+  retention_days: 365
+```
+
+The `CONTEXTD_LOG_LEVEL` environment variable controls log verbosity (`debug`, `info`, `warn`, `error`).
+
+## Development
+
+```bash
+make build        # build ./bin/contextd
+make test         # go test -race ./...
+make test-cover   # coverage report
+make fmt          # gofmt
+make vet          # go vet
+make lint         # golangci-lint
+make tidy         # go mod tidy
+make clean        # remove bin/ and coverage files
 ```
 
 ## Architecture
 
-**[Architecture Documentation](docs/ARCHITECTURE.md)**
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** has a detailed overview of the internal design, data flow, and component interactions. Here's a high-level summary:
 
-## Examples
-
-contextd includes comprehensive Rust examples:
-
-- **Basic Integration** - Core API usage, health checks, audit logging
-- **LLM Memory Integration** - Memory-aware response generation
-- **Batch Operations** - Concurrent processing, error handling, performance testing
-
-**[See Examples Directory](examples/)** for complete working code and API patterns.
-
-## Security & Privacy
-
-- **Local-first**: All data stays on your machine by default
-- **Explicit retrieval**: No automatic context injection
-- **User control**: Delete/export APIs for data sovereignty
-- **Optional encryption**: Per-user keyring support
-
-## Development
-
-### Building from Source
-
-```bash
-# Clone repository
-git clone https://github.com/kumarlokesh/contextd
-cd contextd
-
-# Build and run tests
-cargo build --release
-cargo test
-
-# Start development server
-cargo run -- serve --config contextd.toml
-
-# Run CLI client
-cargo run --bin contextctl -- health
+```text
+┌─────────────────────────────┐
+│   LLM / Agent / MCP client  │
+└──────────────┬──────────────┘
+               │ REST (v1) or MCP (future)
+               ▼
+┌─────────────────────────────┐
+│        contextd daemon      │
+│   (chi router, slog)        │
+└──────┬───────────┬──────────┘
+       │           │
+       ▼           ▼
+┌───────────┐  ┌────────────┐
+│  Store    │  │  Searcher  │
+│  SQLite   │  │  FTS5      │
+│  WAL mode │  │  +vec      │
+└───────────┘  └────────────┘
+       │
+       ▼
+┌─────────────────────────────┐
+│  Audit log                  │
+│  hash-chained, tamper-detect│
+└─────────────────────────────┘
 ```
 
-### Running Examples
-
-```bash
-# Start the daemon
-make serve
-# or: cargo run -- serve
-
-# In another terminal, run the examples
-make run-basic-example      # Basic integration demo
-make run-llm-example        # LLM memory integration demo  
-make run-batch-example      # Batch operations demo
-make demo                   # Run all examples in sequence
-
-# Or run examples manually:
-cd examples
-cargo run --bin basic_integration
-cargo run --bin llm_memory_demo
-cargo run --bin batch_operations
-```
+One SQLite database holds transcripts, FTS5 index, vector embeddings, and the audit log.
 
 ## License
 
-Apache 2.0 License - see [LICENSE](LICENSE) for details.
+Apache 2.0 — see [LICENSE](LICENSE).
