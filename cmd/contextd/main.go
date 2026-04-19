@@ -14,6 +14,7 @@ import (
 
 	"github.com/kumarlokesh/contextd/api"
 	"github.com/kumarlokesh/contextd/config"
+	"github.com/kumarlokesh/contextd/search"
 	"github.com/kumarlokesh/contextd/server"
 	sqlitestore "github.com/kumarlokesh/contextd/store/sqlite"
 )
@@ -88,6 +89,18 @@ func cmdServe(args []string) error {
 	}
 	defer st.Close()
 
+	// FTS5 searcher shares the same SQLite connection as the store.
+	var sr search.Searcher
+	if cfg.Search.FullText {
+		fts, err := search.NewFTSSearcher(st.DB())
+		if err != nil {
+			return fmt.Errorf("initialising FTS searcher: %w", err)
+		}
+		defer fts.Close()
+		sr = fts
+		logger.Info("FTS5 full-text search enabled")
+	}
+
 	build := server.BuildInfo{
 		Version:   version,
 		Commit:    commit,
@@ -96,7 +109,7 @@ func cmdServe(args []string) error {
 
 	srv := server.New(cfg, logger, build)
 	srv.Routes()
-	srv.MountAPI("/v1", api.Router(st, cfg.Policy.MaxResultsPerQuery))
+	srv.MountAPI("/v1", api.Router(st, sr, cfg.Policy.MaxResultsPerQuery))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

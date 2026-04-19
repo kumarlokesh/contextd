@@ -2,13 +2,17 @@ package api
 
 import (
 	"github.com/go-chi/chi/v5"
+
+	"github.com/kumarlokesh/contextd/search"
 	"github.com/kumarlokesh/contextd/store"
 )
 
 // Router returns a chi.Mux with all v1 API routes mounted.
+// Pass a non-nil Searcher to enable FTS5 BM25 search; pass nil to use
+// the substring fallback.
 // The caller should mount this under a prefix via server.MountAPI.
-func Router(st store.Store, maxResultsPerQuery int) *chi.Mux {
-	h := NewHandlers(st, maxResultsPerQuery)
+func Router(st store.Store, sr search.Searcher, maxResultsPerQuery int) *chi.Mux {
+	h := NewHandlers(st, sr, maxResultsPerQuery)
 
 	r := chi.NewRouter()
 	r.Post("/store_chat", h.handleStoreChat)

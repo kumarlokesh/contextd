@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/kumarlokesh/contextd/search"
 	"github.com/kumarlokesh/contextd/store"
 )
 
@@ -17,22 +18,25 @@ const maxBodyBytes = 1 << 20 // 1 MB
 
 // Handlers holds the dependencies for all API handlers.
 type Handlers struct {
-	store  store.Store
-	policy policyConfig
+	store    store.Store
+	searcher search.Searcher // nil until FTS is wired in
+	policy   policyConfig
 }
 
 type policyConfig struct {
 	maxResults int
 }
 
-// NewHandlers constructs Handlers with the given store and policy settings.
-func NewHandlers(st store.Store, maxResultsPerQuery int) *Handlers {
+// NewHandlers constructs Handlers with the given store, optional searcher,
+// and policy settings. Pass nil for searcher to use the substring fallback.
+func NewHandlers(st store.Store, sr search.Searcher, maxResultsPerQuery int) *Handlers {
 	if maxResultsPerQuery <= 0 {
 		maxResultsPerQuery = 100
 	}
 	return &Handlers{
-		store:  st,
-		policy: policyConfig{maxResults: maxResultsPerQuery},
+		store:    st,
+		searcher: sr,
+		policy:   policyConfig{maxResults: maxResultsPerQuery},
 	}
 }
 
@@ -81,8 +85,8 @@ func (h *Handlers) handleStoreChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConversationSearch handles POST /v1/conversation_search.
-// Until M4 lands FTS, this falls back to returning recent chats that contain
-// the query string (case-insensitive substring match).
+// When a Searcher is configured it uses FTS5 BM25; otherwise it falls
+// back to a case-insensitive substring scan over recent chats.
 func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -104,16 +108,72 @@ func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Reque
 		limit = req.MaxResults
 	}
 
-	// Fetch a wider candidate set to filter against.
+	queryHash := hashQuery(req.ProjectID, req.Query, req.TimeRange)
+
+	var results []SearchResult
+	var searchErr error
+
+	if h.searcher != nil {
+		results, searchErr = h.ftsSearch(r, req, limit)
+	} else {
+		results, searchErr = h.substringSearch(r, req, limit)
+	}
+	if searchErr != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "search failed")
+		return
+	}
+	if results == nil {
+		results = []SearchResult{}
+	}
+
+	writeJSON(w, http.StatusOK, SearchResponse{
+		Results:   results,
+		QueryHash: queryHash,
+		TookMS:    time.Since(start).Milliseconds(),
+	})
+}
+
+// ftsSearch delegates to the configured Searcher (FTS5 BM25).
+func (h *Handlers) ftsSearch(r *http.Request, req SearchRequest, limit int) ([]SearchResult, error) {
+	sreq := search.SearchRequest{
+		ProjectID:  req.ProjectID,
+		Query:      req.Query,
+		MaxResults: limit,
+	}
+	if req.TimeRange != nil {
+		sreq.TimeRange = &search.TimeRange{
+			Start: req.TimeRange.Start,
+			End:   req.TimeRange.End,
+		}
+	}
+
+	hits, err := h.searcher.Search(r.Context(), sreq)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]SearchResult, 0, len(hits))
+	for _, h := range hits {
+		results = append(results, SearchResult{
+			ChatID:    h.ChatID,
+			SessionID: h.SessionID,
+			Timestamp: h.Timestamp,
+			Snippet:   h.Snippet,
+			Score:     h.FinalScore,
+		})
+	}
+	return results, nil
+}
+
+// substringSearch is the pre-FTS fallback: case-insensitive substring scan.
+func (h *Handlers) substringSearch(r *http.Request, req SearchRequest, limit int) ([]SearchResult, error) {
 	candidateLimit := limit * 10
 	if candidateLimit < 100 {
 		candidateLimit = 100
 	}
-
 	chats, err := h.store.RecentChats(r.Context(), req.ProjectID, nil, candidateLimit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "search failed")
-		return
+		return nil, err
 	}
 
 	queryLower := strings.ToLower(req.Query)
@@ -133,23 +193,13 @@ func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Reque
 			SessionID: c.SessionID,
 			Timestamp: c.Timestamp,
 			Snippet:   snippet,
-			Score:     1.0, // placeholder until FTS BM25 lands in M4
+			Score:     1.0,
 		})
 		if len(results) >= limit {
 			break
 		}
 	}
-
-	queryHash := hashQuery(req.ProjectID, req.Query, req.TimeRange)
-
-	if results == nil {
-		results = []SearchResult{}
-	}
-	writeJSON(w, http.StatusOK, SearchResponse{
-		Results:   results,
-		QueryHash: queryHash,
-		TookMS:    time.Since(start).Milliseconds(),
-	})
+	return results, nil
 }
 
 // handleRecentChats handles POST /v1/recent_chats.

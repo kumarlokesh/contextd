@@ -46,7 +46,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	// Apply pragmas explicitly — more portable than DSN params.
+	// Apply pragmas explicitly - more portable than DSN params.
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
@@ -256,6 +256,12 @@ func (s *Store) DeleteProject(ctx context.Context, projectID string) (int, error
 		return 0, fmt.Errorf("delete project: %w", err)
 	}
 	return count, nil
+}
+
+// DB returns the underlying *sql.DB. The search layer uses this to share the
+// same SQLite connection pool - FTS5 and vec0 live in the same database file.
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 // Close closes the database and releases all resources.
