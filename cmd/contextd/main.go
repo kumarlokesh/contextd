@@ -9,11 +9,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/kumarlokesh/contextd/api"
 	"github.com/kumarlokesh/contextd/config"
+	"github.com/kumarlokesh/contextd/embed"
 	"github.com/kumarlokesh/contextd/search"
 	"github.com/kumarlokesh/contextd/server"
 	sqlitestore "github.com/kumarlokesh/contextd/store/sqlite"
@@ -91,6 +93,7 @@ func cmdServe(args []string) error {
 
 	// FTS5 searcher shares the same SQLite connection as the store.
 	var sr search.Searcher
+	var startWorker func(context.Context) // set when vector search is enabled
 	if cfg.Search.FullText {
 		fts, err := search.NewFTSSearcher(st.DB())
 		if err != nil {
@@ -99,6 +102,38 @@ func cmdServe(args []string) error {
 		defer fts.Close()
 		sr = fts
 		logger.Info("FTS5 full-text search enabled")
+
+		// Vector search + hybrid ranking (requires vector=true and an embed type).
+		if cfg.Search.Vector && cfg.Embed.Type != "" {
+			vs, err := sqlitestore.NewVecStore(st.DB())
+			if err != nil {
+				return fmt.Errorf("initialising vec store: %w", err)
+			}
+			defer vs.Close()
+
+			embedder, err := buildEmbedder(cfg.Embed)
+			if err != nil {
+				return fmt.Errorf("initialising embedder: %w", err)
+			}
+			defer embedder.Close()
+
+			pollInterval, err := time.ParseDuration(cfg.Embed.PollInterval)
+			if err != nil {
+				pollInterval = 5 * time.Second
+			}
+			w := embed.NewWorker(vs, embedder, cfg.Embed.BatchSize, pollInterval, logger)
+			// startWorker is called after ctx is created below.
+			startWorker = func(c context.Context) { go w.Run(c) }
+
+			sr = search.NewHybridSearcher(fts, vs, embedder,
+				cfg.Search.HybridAlpha, cfg.Search.HybridBeta, cfg.Search.HybridGamma)
+			logger.Info("hybrid search enabled",
+				"embed_type", cfg.Embed.Type,
+				"alpha", cfg.Search.HybridAlpha,
+				"beta", cfg.Search.HybridBeta,
+				"gamma", cfg.Search.HybridGamma,
+			)
+		}
 	}
 
 	build := server.BuildInfo{
@@ -113,6 +148,10 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	if startWorker != nil {
+		startWorker(ctx)
+	}
 
 	return srv.Start(ctx)
 }
@@ -170,6 +209,23 @@ func buildLogger() *slog.Logger {
 		}
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+}
+
+// buildEmbedder constructs an Embedder based on the config type.
+// Returns an error if the type is unrecognised or required config is absent.
+func buildEmbedder(cfg config.EmbedConfig) (embed.Embedder, error) {
+	switch cfg.Type {
+	case "ollama":
+		return embed.NewOllamaEmbedder(cfg.OllamaURL, cfg.OllamaModel), nil
+	case "openai":
+		key := os.Getenv("OPENAI_API_KEY")
+		if key == "" {
+			return nil, fmt.Errorf("OPENAI_API_KEY env var is required for openai embedder")
+		}
+		return embed.NewOpenAIEmbedder(key, cfg.OpenAIModel, cfg.Dimensions), nil
+	default:
+		return nil, fmt.Errorf("unknown embed type %q (supported: ollama, openai)", cfg.Type)
+	}
 }
 
 func printUsage() {

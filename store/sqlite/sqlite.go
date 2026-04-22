@@ -12,11 +12,18 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver
+	_ "github.com/mattn/go-sqlite3" // CGo SQLite driver (required for sqlite-vec extension)
+
+	vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 
 	"github.com/kumarlokesh/contextd/store"
 	"github.com/kumarlokesh/contextd/store/sqlite/migrations"
 )
+
+func init() {
+	// Register the vec0 virtual table extension with every sqlite3 connection.
+	vec.Auto()
+}
 
 // Store is a SQLite-backed implementation of store.Store.
 type Store struct {
@@ -37,7 +44,7 @@ type Store struct {
 // Open opens (or creates) the SQLite database at path, runs migrations, and
 // returns a ready Store.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}

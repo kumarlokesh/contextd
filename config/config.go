@@ -13,6 +13,7 @@ type Config struct {
 	Server  ServerConfig  `yaml:"server"`
 	Storage StorageConfig `yaml:"storage"`
 	Search  SearchConfig  `yaml:"search"`
+	Embed   EmbedConfig   `yaml:"embed"`
 	Policy  PolicyConfig  `yaml:"policy"`
 	Audit   AuditConfig   `yaml:"audit"`
 }
@@ -51,6 +52,26 @@ type AuditConfig struct {
 	RetentionDays int  `yaml:"retention_days"` // default 365
 }
 
+// EmbedConfig controls how chat content is embedded for vector search.
+type EmbedConfig struct {
+	// Type selects the embedding provider: "ollama", "openai", or "" (disabled).
+	Type string `yaml:"type"` // default ""
+	// OllamaURL is the base URL of the Ollama server.
+	OllamaURL string `yaml:"ollama_url"` // default "http://localhost:11434"
+	// OllamaModel is the Ollama model used for embeddings.
+	// Must produce Dimensions-length vectors.
+	OllamaModel string `yaml:"ollama_model"` // default "all-minilm"
+	// OpenAIModel is the OpenAI embedding model.
+	OpenAIModel string `yaml:"openai_model"` // default "text-embedding-3-small"
+	// Dimensions is the expected output vector length.
+	// Must match the vec0 table definition (migration 003, default 384).
+	Dimensions int `yaml:"dimensions"` // default 384
+	// BatchSize is the number of chats embedded per worker tick.
+	BatchSize int `yaml:"batch_size"` // default 32
+	// PollInterval is how often the background worker checks for pending chats.
+	PollInterval string `yaml:"poll_interval"` // default "5s"
+}
+
 // Default returns a Config populated with sensible defaults.
 func Default() *Config {
 	return &Config{
@@ -73,6 +94,15 @@ func Default() *Config {
 		Policy: PolicyConfig{
 			DefaultRetentionDays: 90,
 			MaxResultsPerQuery:   100,
+		},
+		Embed: EmbedConfig{
+			Type:         "",
+			OllamaURL:    "http://localhost:11434",
+			OllamaModel:  "all-minilm",
+			OpenAIModel:  "text-embedding-3-small",
+			Dimensions:   384,
+			BatchSize:    32,
+			PollInterval: "5s",
 		},
 		Audit: AuditConfig{
 			Enabled:       true,
