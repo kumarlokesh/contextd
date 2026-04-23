@@ -1,41 +1,28 @@
-version: '3.8'
-
 services:
   contextd:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: "${VERSION:-dev}"
     container_name: contextd
     ports:
       - "8080:8080"
     volumes:
-      - contextd_data:/data
-      - ./contextd.toml:/etc/contextd/contextd.toml:ro
+      - contextd_data:/var/lib/contextd
+      # Uncomment to mount a custom config (overrides the built-in container default):
+      # - ./contextd.yaml:/etc/contextd/contextd.yaml:ro
     environment:
-      - RUST_LOG=contextd=info,tower_http=info
+      - CONTEXTD_LOG_LEVEL=info
+      # Set OPENAI_API_KEY here if using the openai embedder:
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "contextctl", "--url", "http://localhost:8080", "health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-
-  # Optional: PostgreSQL backend for production
-  postgres:
-    image: postgres:15-alpine
-    container_name: contextd-postgres
-    environment:
-      POSTGRES_DB: contextd
-      POSTGRES_USER: contextd
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    restart: unless-stopped
-    profiles: ["postgres"]
+      start_period: 15s
 
 volumes:
   contextd_data:
-    driver: local
-  postgres_data:
     driver: local

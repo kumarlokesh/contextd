@@ -1,67 +1,59 @@
-# Multi-stage build for contextd
-FROM rust:1.70 AS builder
+# Multi-stage build for contextd.
+#
+# CGo is required because sqlite-vec (mattn/go-sqlite3) loads the vec0
+# extension via sqlite3_auto_extension. We build on Alpine (musl libc) and
+# run on Alpine to avoid any glibc/musl mismatch.
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    sqlite3 \
-    libsqlite3-dev \
-    && rm -rf /var/lib/apt/lists/*
+# ── builder ──────────────────────────────────────────────────────────────────
+FROM golang:1.24-alpine AS builder
 
-# Create app directory
+# gcc + musl-dev are needed for CGo (mattn/go-sqlite3).
+RUN apk add --no-cache gcc musl-dev
+
 WORKDIR /app
 
-# Copy dependency files
-COPY Cargo.toml Cargo.lock ./
+# Download dependencies before copying source so Docker can cache this layer.
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Create dummy main.rs to cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release && rm -rf src
+COPY . .
 
-# Copy source code
-COPY src/ src/
-COPY contextd.toml ./
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 
-# Build the application
-RUN touch src/main.rs && cargo build --release
+RUN CGO_ENABLED=1 go build \
+    -tags sqlite_fts5 \
+    -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
+    -o /contextd \
+    ./cmd/contextd
 
-# Runtime stage
-FROM debian:bookworm-slim
+# ── runtime ──────────────────────────────────────────────────────────────────
+FROM alpine:3.20
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    sqlite3 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates
 
-# Create non-root user
-RUN useradd -m -u 1000 contextd
+# Non-root user/group.
+RUN addgroup -S contextd && adduser -S contextd -G contextd
 
-# Create data directory
-RUN mkdir -p /data && chown contextd:contextd /data
+# Data directory (mount a volume here for persistence).
+RUN mkdir -p /var/lib/contextd /etc/contextd && \
+    chown contextd:contextd /var/lib/contextd
 
-# Copy binary and config
-COPY --from=builder /app/target/release/contextd /usr/local/bin/contextd
-COPY --from=builder /app/target/release/contextctl /usr/local/bin/contextctl
-COPY --from=builder /app/contextd.toml /etc/contextd/contextd.toml
+# Default container config: listen on all interfaces, store data in the volume.
+# Mount your own config at /etc/contextd/contextd.yaml to override.
+RUN printf 'server:\n  host: "0.0.0.0"\n  port: 8080\nstorage:\n  path: "/var/lib/contextd/contextd.db"\n' \
+    > /etc/contextd/contextd.yaml
 
-# Update config for container environment
-RUN sed -i 's|sqlite_path = "./data/contextd.db"|sqlite_path = "/data/contextd.db"|' /etc/contextd/contextd.toml && \
-    sed -i 's|index_path = "./data/index"|index_path = "/data/index"|' /etc/contextd/contextd.toml && \
-    sed -i 's|log_path = "./data/audit.log"|log_path = "/data/audit.log"|' /etc/contextd/contextd.toml && \
-    sed -i 's|host = "127.0.0.1"|host = "0.0.0.0"|' /etc/contextd/contextd.toml
+COPY --from=builder /contextd /usr/local/bin/contextd
 
-# Switch to non-root user
 USER contextd
 
-# Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD contextctl --url http://localhost:8080 health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD wget -qO- http://localhost:8080/health || exit 1
 
-# Volume for persistent data
-VOLUME ["/data"]
+VOLUME ["/var/lib/contextd"]
 
-# Default command
-CMD ["contextd", "serve", "--config", "/etc/contextd/contextd.toml"]
+CMD ["contextd", "serve", "--config", "/etc/contextd/contextd.yaml"]

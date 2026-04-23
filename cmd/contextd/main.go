@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kumarlokesh/contextd/api"
+	"github.com/kumarlokesh/contextd/audit"
 	"github.com/kumarlokesh/contextd/config"
 	"github.com/kumarlokesh/contextd/embed"
 	"github.com/kumarlokesh/contextd/search"
@@ -48,6 +50,8 @@ func run(args []string) error {
 		return cmdVersion(args[1:])
 	case "init-config":
 		return cmdInitConfig(args[1:])
+	case "verify-audit":
+		return cmdVerifyAudit(args[1:])
 	case "-h", "--help", "help":
 		printUsage()
 		return nil
@@ -136,6 +140,18 @@ func cmdServe(args []string) error {
 		}
 	}
 
+	// Audit logger shares the same SQLite connection as the store.
+	var al audit.Logger
+	if cfg.Audit.Enabled {
+		aLogger, err := audit.NewSQLiteLogger(st.DB())
+		if err != nil {
+			return fmt.Errorf("initialising audit logger: %w", err)
+		}
+		defer aLogger.Close()
+		al = aLogger
+		logger.Info("audit log enabled")
+	}
+
 	build := server.BuildInfo{
 		Version:   version,
 		Commit:    commit,
@@ -144,7 +160,7 @@ func cmdServe(args []string) error {
 
 	srv := server.New(cfg, logger, build)
 	srv.Routes()
-	srv.MountAPI("/v1", api.Router(st, sr, cfg.Policy.MaxResultsPerQuery))
+	srv.MountAPI("/v1", api.Router(st, sr, al, cfg.Policy.MaxResultsPerQuery))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -228,13 +244,64 @@ func buildEmbedder(cfg config.EmbedConfig) (embed.Embedder, error) {
 	}
 }
 
+// cmdVerifyAudit opens the audit log at the given database path and verifies
+// the hash chain. Exits 0 if valid, 1 if invalid or on error.
+func cmdVerifyAudit(args []string) error {
+	fs := flag.NewFlagSet("verify-audit", flag.ContinueOnError)
+	dbPath := fs.String("db", "./data/contextd.db", "path to the contextd SQLite database")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: contextd verify-audit [--db <path>]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	db, err := openAuditDB(*dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	al, err := audit.NewSQLiteLogger(db)
+	if err != nil {
+		return fmt.Errorf("initialising audit logger: %w", err)
+	}
+	defer al.Close()
+
+	result, err := audit.Verify(context.Background(), al)
+	if err != nil {
+		return fmt.Errorf("verification error: %w", err)
+	}
+
+	if result.Valid {
+		fmt.Printf("audit chain valid — %d entries checked\n", result.EntriesChecked)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "audit chain INVALID: %s (first invalid entry id=%d, checked %d)\n",
+		result.Reason, result.FirstInvalidID, result.EntriesChecked)
+	os.Exit(1)
+	return nil
+}
+
+// openAuditDB opens a read-only SQLite connection for audit verification.
+func openAuditDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage: contextd <command> [flags]
 
 Commands:
-  serve        Start the contextd HTTP daemon
-  version      Print version information
-  init-config  Write a default contextd.yaml to disk
+  serve         Start the contextd HTTP daemon
+  version       Print version information
+  init-config   Write a default contextd.yaml to disk
+  verify-audit  Verify the integrity of the audit log hash chain
 
 Run "contextd <command> --help" for command-specific flags.`)
 }

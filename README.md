@@ -127,21 +127,6 @@ audit:
   retention_days: 365
 ```
 
-The `CONTEXTD_LOG_LEVEL` environment variable controls log verbosity (`debug`, `info`, `warn`, `error`).
-
-## Development
-
-```bash
-make build        # build ./bin/contextd
-make test         # go test -race ./...
-make test-cover   # coverage report
-make fmt          # gofmt
-make vet          # go vet
-make lint         # golangci-lint
-make tidy         # go mod tidy
-make clean        # remove bin/ and coverage files
-```
-
 ## Architecture
 
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** has a detailed overview of the internal design, data flow, and component interactions. Here's a high-level summary:

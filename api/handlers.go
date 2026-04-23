@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/kumarlokesh/contextd/audit"
 	"github.com/kumarlokesh/contextd/search"
 	"github.com/kumarlokesh/contextd/store"
 )
@@ -19,7 +21,8 @@ const maxBodyBytes = 1 << 20 // 1 MB
 // Handlers holds the dependencies for all API handlers.
 type Handlers struct {
 	store    store.Store
-	searcher search.Searcher // nil until FTS is wired in
+	searcher search.Searcher // nil → substring fallback
+	auditor  audit.Logger   // nil → audit disabled
 	policy   policyConfig
 }
 
@@ -27,15 +30,16 @@ type policyConfig struct {
 	maxResults int
 }
 
-// NewHandlers constructs Handlers with the given store, optional searcher,
-// and policy settings. Pass nil for searcher to use the substring fallback.
-func NewHandlers(st store.Store, sr search.Searcher, maxResultsPerQuery int) *Handlers {
+// NewHandlers constructs Handlers. Pass nil for searcher or auditor to
+// disable those features.
+func NewHandlers(st store.Store, sr search.Searcher, al audit.Logger, maxResultsPerQuery int) *Handlers {
 	if maxResultsPerQuery <= 0 {
 		maxResultsPerQuery = 100
 	}
 	return &Handlers{
 		store:    st,
 		searcher: sr,
+		auditor:  al,
 		policy:   policyConfig{maxResults: maxResultsPerQuery},
 	}
 }
@@ -85,8 +89,8 @@ func (h *Handlers) handleStoreChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConversationSearch handles POST /v1/conversation_search.
-// When a Searcher is configured it uses FTS5 BM25; otherwise it falls
-// back to a case-insensitive substring scan over recent chats.
+// When a Searcher is configured it uses FTS5 BM25 (or hybrid); otherwise it
+// falls back to a case-insensitive substring scan over recent chats.
 func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -126,6 +130,17 @@ func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Reque
 		results = []SearchResult{}
 	}
 
+	// Audit: log the search with hashed result IDs.
+	h.logAudit(r, audit.Entry{
+		ProjectID: req.ProjectID,
+		Action:    audit.ActionSearch,
+		QueryHash: queryHash,
+		ResultHashes: resultHashes(results),
+		Metadata: map[string]any{
+			"result_count": len(results),
+		},
+	})
+
 	writeJSON(w, http.StatusOK, SearchResponse{
 		Results:   results,
 		QueryHash: queryHash,
@@ -133,7 +148,7 @@ func (h *Handlers) handleConversationSearch(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// ftsSearch delegates to the configured Searcher (FTS5 BM25).
+// ftsSearch delegates to the configured Searcher (FTS5 BM25 or hybrid).
 func (h *Handlers) ftsSearch(r *http.Request, req SearchRequest, limit int) ([]SearchResult, error) {
 	sreq := search.SearchRequest{
 		ProjectID:  req.ProjectID,
@@ -227,6 +242,18 @@ func (h *Handlers) handleRecentChats(w http.ResponseWriter, r *http.Request) {
 		chats = []store.Chat{}
 	}
 
+	// Audit the retrieval.
+	rh := make([]string, len(chats))
+	for i, c := range chats {
+		rh[i] = audit.HashChatID(c.ID)
+	}
+	h.logAudit(r, audit.Entry{
+		ProjectID:    req.ProjectID,
+		Action:       audit.ActionRetrieve,
+		ResultHashes: rh,
+		Metadata:     map[string]any{"result_count": len(chats)},
+	})
+
 	writeJSON(w, http.StatusOK, RecentChatsResponse{Chats: chats})
 }
 
@@ -247,6 +274,13 @@ func (h *Handlers) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to delete chat")
 		return
 	}
+
+	h.logAudit(r, audit.Entry{
+		ProjectID: projectID,
+		Action:    audit.ActionDelete,
+		Metadata:  map[string]any{"chat_id": chatID},
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -263,16 +297,100 @@ func (h *Handlers) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to delete project")
 		return
 	}
+
+	h.logAudit(r, audit.Entry{
+		ProjectID: projectID,
+		Action:    audit.ActionDelete,
+		Metadata:  map[string]any{"project_id": projectID, "chats_deleted": count},
+	})
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project_id":    projectID,
 		"chats_deleted": count,
 	})
 }
 
+// handleAuditLogs handles POST /v1/audit/logs.
+func (h *Handlers) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if h.auditor == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternal, "audit log not enabled")
+		return
+	}
+
+	var req AuditLogsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project_id is required")
+		return
+	}
+
+	limit := h.policy.maxResults
+	if req.Limit > 0 && req.Limit < limit {
+		limit = req.Limit
+	}
+
+	filter := audit.Filter{
+		ProjectID: req.ProjectID,
+		Action:    req.Action,
+		Limit:     limit,
+		Offset:    req.Offset,
+	}
+	if req.TimeRange != nil {
+		filter.TimeRange = &audit.TimeRange{
+			Start: req.TimeRange.Start,
+			End:   req.TimeRange.End,
+		}
+	}
+
+	entries, err := h.auditor.Query(r.Context(), filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to query audit log")
+		return
+	}
+
+	out := make([]AuditEntry, len(entries))
+	for i, e := range entries {
+		out[i] = AuditEntry{
+			ID:           e.ID,
+			Timestamp:    e.Timestamp,
+			ProjectID:    e.ProjectID,
+			Action:       e.Action,
+			Actor:        e.Actor,
+			QueryHash:    e.QueryHash,
+			ResultHashes: e.ResultHashes,
+			Metadata:     e.Metadata,
+			PrevHash:     e.PrevHash,
+			EntryHash:    e.EntryHash,
+		}
+	}
+	writeJSON(w, http.StatusOK, AuditLogsResponse{Entries: out})
+}
+
+// handleAuditVerify handles POST /v1/audit/verify.
+func (h *Handlers) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
+	if h.auditor == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternal, "audit log not enabled")
+		return
+	}
+
+	result, err := audit.Verify(r.Context(), h.auditor)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "verification failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, VerifyAuditResponse{
+		Valid:          result.Valid,
+		FirstInvalidID: result.FirstInvalidID,
+		Reason:         result.Reason,
+		EntriesChecked: result.EntriesChecked,
+	})
+}
+
 // --- helpers -----------------------------------------------------------------
 
-// decodeJSON decodes the request body into dst. On any error it writes a 400
-// and returns false.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -289,8 +407,6 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// matchSnippet returns a short excerpt from the first matching message,
-// or "" if the query is not found. queryLower must already be lowercased.
 func matchSnippet(msgs []store.Message, queryLower string) string {
 	for _, m := range msgs {
 		lower := strings.ToLower(m.Content)
@@ -330,3 +446,21 @@ func hashQuery(projectID, query string, tr *TimeRange) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+// resultHashes returns the SHA-256 hashes of the chat IDs in results.
+func resultHashes(results []SearchResult) []string {
+	hashes := make([]string, len(results))
+	for i, r := range results {
+		hashes[i] = audit.HashChatID(r.ChatID)
+	}
+	return hashes
+}
+
+// logAudit fires an audit log entry, ignoring errors (best-effort).
+func (h *Handlers) logAudit(r *http.Request, entry audit.Entry) {
+	if h.auditor == nil {
+		return
+	}
+	if err := h.auditor.Log(r.Context(), entry); err != nil {
+		slog.Warn("audit log failed", "action", entry.Action, "project", entry.ProjectID, "err", err)
+	}
+}

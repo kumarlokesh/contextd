@@ -75,3 +75,39 @@ type ErrorBody struct {
 	Message string `json:"message"`
 	Details any    `json:"details,omitempty"`
 }
+
+// AuditLogsRequest is the payload for POST /v1/audit/logs.
+type AuditLogsRequest struct {
+	ProjectID string     `json:"project_id"`
+	Action    string     `json:"action,omitempty"`
+	TimeRange *TimeRange `json:"time_range,omitempty"`
+	Limit     int        `json:"limit,omitempty"`
+	Offset    int        `json:"offset,omitempty"`
+}
+
+// AuditLogsResponse is the response for POST /v1/audit/logs.
+type AuditLogsResponse struct {
+	Entries []AuditEntry `json:"entries"`
+}
+
+// AuditEntry is a single audit log record as returned by the API.
+type AuditEntry struct {
+	ID           int64          `json:"id"`
+	Timestamp    time.Time      `json:"timestamp"`
+	ProjectID    string         `json:"project_id"`
+	Action       string         `json:"action"`
+	Actor        string         `json:"actor"`
+	QueryHash    string         `json:"query_hash,omitempty"`
+	ResultHashes []string       `json:"result_hashes,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	PrevHash     string         `json:"prev_hash"`
+	EntryHash    string         `json:"entry_hash"`
+}
+
+// VerifyAuditResponse is the response for POST /v1/audit/verify.
+type VerifyAuditResponse struct {
+	Valid          bool   `json:"valid"`
+	FirstInvalidID int64  `json:"first_invalid_id,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	EntriesChecked int    `json:"entries_checked"`
+}

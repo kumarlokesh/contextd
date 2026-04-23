@@ -19,8 +19,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	// nil searcher → substring fallback (FTS wired separately in integration tests)
-	return httptest.NewServer(Router(st, nil, 100))
+	// nil searcher → substring fallback; nil auditor → audit disabled in tests
+	return httptest.NewServer(Router(st, nil, nil, 100))
 }
 
 func post(t *testing.T, srv *httptest.Server, path string, body any) *http.Response {
