@@ -42,8 +42,9 @@ type SearchConfig struct {
 
 // PolicyConfig controls data-access policies.
 type PolicyConfig struct {
-	DefaultRetentionDays int `yaml:"default_retention_days"` // default 90
-	MaxResultsPerQuery   int `yaml:"max_results_per_query"`  // default 100
+	DefaultRetentionDays  int    `yaml:"default_retention_days"`   // default 90
+	MaxResultsPerQuery    int    `yaml:"max_results_per_query"`    // default 100
+	RetentionSweepInterval string `yaml:"retention_sweep_interval"` // default "24h"
 }
 
 // AuditConfig controls the audit log behaviour.
@@ -92,8 +93,9 @@ func Default() *Config {
 			HybridGamma: 0.1,
 		},
 		Policy: PolicyConfig{
-			DefaultRetentionDays: 90,
-			MaxResultsPerQuery:   100,
+			DefaultRetentionDays:   90,
+			MaxResultsPerQuery:     100,
+			RetentionSweepInterval: "24h",
 		},
 		Embed: EmbedConfig{
 			Type:         "",

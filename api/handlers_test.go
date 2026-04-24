@@ -20,7 +20,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	t.Cleanup(func() { st.Close() })
 	// nil searcher → substring fallback; nil auditor → audit disabled in tests
-	return httptest.NewServer(Router(st, nil, nil, 100))
+	return httptest.NewServer(Router(st, nil, nil, 100, 90))
 }
 
 func post(t *testing.T, srv *httptest.Server, path string, body any) *http.Response {

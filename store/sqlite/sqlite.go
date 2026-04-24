@@ -30,15 +30,21 @@ type Store struct {
 	db *sql.DB
 
 	// Prepared statements cached for the lifetime of the store.
-	stmtInsertProject *sql.Stmt
-	stmtInsertSession *sql.Stmt
-	stmtInsertChat    *sql.Stmt
-	stmtGetChat       *sql.Stmt
-	stmtRecentChats   *sql.Stmt
+	stmtInsertProject   *sql.Stmt
+	stmtInsertSession   *sql.Stmt
+	stmtInsertChat      *sql.Stmt
+	stmtGetChat         *sql.Stmt
+	stmtRecentChats     *sql.Stmt
 	stmtRecentBySession *sql.Stmt
-	stmtDeleteChat    *sql.Stmt
-	stmtDeleteProject *sql.Stmt
-	stmtCountProject  *sql.Stmt
+	stmtDeleteChat      *sql.Stmt
+	stmtDeleteProject   *sql.Stmt
+	stmtCountProject    *sql.Stmt
+	stmtForEachChat     *sql.Stmt
+	stmtAllProjectIDs   *sql.Stmt
+	stmtDeleteOld       *sql.Stmt
+	stmtGetRetention    *sql.Stmt
+	stmtSetRetention    *sql.Stmt
+	stmtDelRetention    *sql.Stmt
 }
 
 // Open opens (or creates) the SQLite database at path, runs migrations, and
@@ -139,6 +145,46 @@ func (s *Store) prepare() error {
 
 	s.stmtDeleteProject, err = s.db.Prepare(
 		`DELETE FROM projects WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtForEachChat, err = s.db.Prepare(
+		`SELECT id, project_id, session_id, timestamp, messages, metadata
+		 FROM chats WHERE project_id = ? ORDER BY timestamp ASC`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtAllProjectIDs, err = s.db.Prepare(`SELECT id FROM projects ORDER BY id`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtDeleteOld, err = s.db.Prepare(
+		`DELETE FROM chats WHERE project_id = ? AND timestamp < ?`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtGetRetention, err = s.db.Prepare(
+		`SELECT retention_days FROM project_retentions WHERE project_id = ?`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtSetRetention, err = s.db.Prepare(`
+		INSERT INTO project_retentions (project_id, retention_days, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(project_id) DO UPDATE SET
+			retention_days = excluded.retention_days,
+			updated_at     = excluded.updated_at`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtDelRetention, err = s.db.Prepare(
+		`DELETE FROM project_retentions WHERE project_id = ?`)
 	if err != nil {
 		return err
 	}
@@ -265,6 +311,73 @@ func (s *Store) DeleteProject(ctx context.Context, projectID string) (int, error
 	return count, nil
 }
 
+// ForEachChat calls fn for every chat in projectID (ascending timestamp order).
+func (s *Store) ForEachChat(ctx context.Context, projectID string, fn func(store.Chat) error) error {
+	rows, err := s.stmtForEachChat.QueryContext(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		chat, err := scanChatRow(rows)
+		if err != nil {
+			return err
+		}
+		if err := fn(*chat); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// AllProjectIDs returns the IDs of all projects.
+func (s *Store) AllProjectIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.stmtAllProjectIDs.QueryContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// DeleteChatsOlderThan deletes chats older than cutoff and returns the count.
+func (s *Store) DeleteChatsOlderThan(ctx context.Context, projectID string, cutoff time.Time) (int, error) {
+	res, err := s.stmtDeleteOld.ExecContext(ctx, projectID, cutoff.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ProjectRetention returns the per-project retention override, or 0 if none.
+func (s *Store) ProjectRetention(ctx context.Context, projectID string) (int, error) {
+	var days int
+	err := s.stmtGetRetention.QueryRowContext(ctx, projectID).Scan(&days)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return days, err
+}
+
+// SetProjectRetention sets (days > 0) or clears (days == 0) the override.
+func (s *Store) SetProjectRetention(ctx context.Context, projectID string, days int) error {
+	if days <= 0 {
+		_, err := s.stmtDelRetention.ExecContext(ctx, projectID)
+		return err
+	}
+	_, err := s.stmtSetRetention.ExecContext(ctx, projectID, days, time.Now().UnixMilli())
+	return err
+}
+
 // DB returns the underlying *sql.DB. The search layer uses this to share the
 // same SQLite connection pool - FTS5 and vec0 live in the same database file.
 func (s *Store) DB() *sql.DB {
@@ -283,6 +396,12 @@ func (s *Store) Close() error {
 		s.stmtDeleteChat,
 		s.stmtCountProject,
 		s.stmtDeleteProject,
+		s.stmtForEachChat,
+		s.stmtAllProjectIDs,
+		s.stmtDeleteOld,
+		s.stmtGetRetention,
+		s.stmtSetRetention,
+		s.stmtDelRetention,
 	}
 	for _, stmt := range stmts {
 		if stmt != nil {

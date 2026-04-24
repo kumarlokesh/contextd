@@ -16,6 +16,12 @@ import (
 	"github.com/kumarlokesh/contextd/store"
 )
 
+// mustJSON encodes v as a JSON string literal (used for inline JSON building).
+func mustJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 const maxBodyBytes = 1 << 20 // 1 MB
 
 // Handlers holds the dependencies for all API handlers.
@@ -27,20 +33,27 @@ type Handlers struct {
 }
 
 type policyConfig struct {
-	maxResults int
+	maxResults          int
+	defaultRetentionDays int
 }
 
 // NewHandlers constructs Handlers. Pass nil for searcher or auditor to
 // disable those features.
-func NewHandlers(st store.Store, sr search.Searcher, al audit.Logger, maxResultsPerQuery int) *Handlers {
+func NewHandlers(st store.Store, sr search.Searcher, al audit.Logger, maxResultsPerQuery, defaultRetentionDays int) *Handlers {
 	if maxResultsPerQuery <= 0 {
 		maxResultsPerQuery = 100
+	}
+	if defaultRetentionDays <= 0 {
+		defaultRetentionDays = 90
 	}
 	return &Handlers{
 		store:    st,
 		searcher: sr,
 		auditor:  al,
-		policy:   policyConfig{maxResults: maxResultsPerQuery},
+		policy: policyConfig{
+			maxResults:           maxResultsPerQuery,
+			defaultRetentionDays: defaultRetentionDays,
+		},
 	}
 }
 
@@ -386,6 +399,118 @@ func (h *Handlers) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		FirstInvalidID: result.FirstInvalidID,
 		Reason:         result.Reason,
 		EntriesChecked: result.EntriesChecked,
+	})
+}
+
+// handleExportProject handles GET /v1/projects/{id}/export.
+// Query param ?format=ndjson (default) or ?format=json.
+func (h *Handlers) handleExportProject(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project id is required")
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	switch format {
+	case "", "ndjson":
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+projectID+`.ndjson"`)
+		enc := json.NewEncoder(w)
+		if err := h.store.ForEachChat(r.Context(), projectID, func(c store.Chat) error {
+			return enc.Encode(c)
+		}); err != nil {
+			slog.Error("export ndjson: stream error", "project", projectID, "err", err)
+		}
+	case "json":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+projectID+`.json"`)
+		fmt.Fprintf(w, `{"project_id":%s,"exported_at":%s,"chats":[`,
+			mustJSON(projectID), mustJSON(time.Now().UTC().Format(time.RFC3339)))
+		first := true
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		if err := h.store.ForEachChat(r.Context(), projectID, func(c store.Chat) error {
+			if !first {
+				w.Write([]byte(",")) //nolint:errcheck
+			}
+			first = false
+			return enc.Encode(c)
+		}); err != nil {
+			slog.Error("export json: stream error", "project", projectID, "err", err)
+		}
+		w.Write([]byte("]}")) //nolint:errcheck
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, `unknown format; use "ndjson" or "json"`)
+		return
+	}
+
+	h.logAudit(r, audit.Entry{
+		ProjectID: projectID,
+		Action:    audit.ActionExport,
+		Metadata:  map[string]any{"format": format},
+	})
+}
+
+// handleGetRetention handles GET /v1/projects/{id}/retention.
+func (h *Handlers) handleGetRetention(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project id is required")
+		return
+	}
+
+	override, err := h.store.ProjectRetention(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to read retention")
+		return
+	}
+
+	days := h.policy.defaultRetentionDays
+	isOverride := override > 0
+	if isOverride {
+		days = override
+	}
+
+	writeJSON(w, http.StatusOK, RetentionResponse{
+		ProjectID:     projectID,
+		RetentionDays: days,
+		IsOverride:    isOverride,
+	})
+}
+
+// handleSetRetention handles PUT /v1/projects/{id}/retention.
+func (h *Handlers) handleSetRetention(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "project id is required")
+		return
+	}
+
+	var req RetentionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.RetentionDays < 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeBadRequest, "retention_days must be >= 0")
+		return
+	}
+
+	if err := h.store.SetProjectRetention(r.Context(), projectID, req.RetentionDays); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternal, "failed to set retention")
+		return
+	}
+
+	// Return the new effective retention.
+	days := h.policy.defaultRetentionDays
+	isOverride := req.RetentionDays > 0
+	if isOverride {
+		days = req.RetentionDays
+	}
+	writeJSON(w, http.StatusOK, RetentionResponse{
+		ProjectID:     projectID,
+		RetentionDays: days,
+		IsOverride:    isOverride,
 	})
 }
 

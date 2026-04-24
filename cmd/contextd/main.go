@@ -18,6 +18,7 @@ import (
 	"github.com/kumarlokesh/contextd/audit"
 	"github.com/kumarlokesh/contextd/config"
 	"github.com/kumarlokesh/contextd/embed"
+	"github.com/kumarlokesh/contextd/privacy"
 	"github.com/kumarlokesh/contextd/search"
 	"github.com/kumarlokesh/contextd/server"
 	sqlitestore "github.com/kumarlokesh/contextd/store/sqlite"
@@ -158,9 +159,16 @@ func cmdServe(args []string) error {
 		BuildDate: buildDate,
 	}
 
+	// Retention enforcer: sweeps old chats according to per-project or default policy.
+	sweepInterval, err := time.ParseDuration(cfg.Policy.RetentionSweepInterval)
+	if err != nil {
+		sweepInterval = 24 * time.Hour
+	}
+	enforcer := privacy.NewEnforcer(st, al, cfg.Policy.DefaultRetentionDays, sweepInterval, logger)
+
 	srv := server.New(cfg, logger, build)
 	srv.Routes()
-	srv.MountAPI("/v1", api.Router(st, sr, al, cfg.Policy.MaxResultsPerQuery))
+	srv.MountAPI("/v1", api.Router(st, sr, al, cfg.Policy.MaxResultsPerQuery, cfg.Policy.DefaultRetentionDays))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -168,6 +176,7 @@ func cmdServe(args []string) error {
 	if startWorker != nil {
 		startWorker(ctx)
 	}
+	go enforcer.Start(ctx)
 
 	return srv.Start(ctx)
 }

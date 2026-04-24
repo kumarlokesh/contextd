@@ -111,3 +111,17 @@ type VerifyAuditResponse struct {
 	Reason         string `json:"reason,omitempty"`
 	EntriesChecked int    `json:"entries_checked"`
 }
+
+// RetentionRequest is the payload for PUT /v1/projects/{id}/retention.
+type RetentionRequest struct {
+	// RetentionDays sets the per-project override. Use 0 to clear the override
+	// and revert to the global default.
+	RetentionDays int `json:"retention_days"`
+}
+
+// RetentionResponse is the response for GET /v1/projects/{id}/retention.
+type RetentionResponse struct {
+	ProjectID     string `json:"project_id"`
+	RetentionDays int    `json:"retention_days"` // effective value (override or default)
+	IsOverride    bool   `json:"is_override"`    // true when a per-project override is active
+}

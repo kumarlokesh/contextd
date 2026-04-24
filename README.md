@@ -16,9 +16,9 @@ Single binary. Single SQLite database for transcripts, full-text search, vectors
 - **Explicit retrieval** - no silent context injection; your agent decides when to query memory
 - **Local-first** - SQLite on disk, full offline operation; Postgres backend _(coming in a later phase)_
 - **Hybrid search** - SQLite FTS5 (BM25) + sqlite-vec (semantic) + temporal decay, all in one database
-- **Hash-chained audit log** - every search and retrieval is recorded; the chain detects tampering _(coming in a later phase)_
+- **Hash-chained audit log** - every search and retrieval is recorded; the chain detects tampering
 - **MCP server** - consumable by Claude Desktop, Cursor, and any MCP client _(coming in a later phase)_
-- **Privacy APIs** - export and delete by project, per-project retention _(coming in a later phase)_
+- **Privacy APIs** - export and delete by project, per-project retention
 
 ## Quick start
 

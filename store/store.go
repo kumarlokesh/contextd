@@ -21,6 +21,20 @@ type Store interface {
 	// DeleteProject removes all chats, sessions, and the project itself.
 	// Returns the number of chats deleted.
 	DeleteProject(ctx context.Context, projectID string) (int, error)
+	// ForEachChat calls fn for every chat in projectID (ascending timestamp).
+	// Stops and returns fn's error immediately if fn returns one.
+	ForEachChat(ctx context.Context, projectID string, fn func(Chat) error) error
+	// AllProjectIDs returns the IDs of all projects.
+	AllProjectIDs(ctx context.Context) ([]string, error)
+	// DeleteChatsOlderThan deletes chats for projectID with timestamp before
+	// cutoff and returns the number of rows deleted.
+	DeleteChatsOlderThan(ctx context.Context, projectID string, cutoff time.Time) (int, error)
+	// ProjectRetention returns the per-project retention override in days,
+	// or 0 if no override is set for this project.
+	ProjectRetention(ctx context.Context, projectID string) (int, error)
+	// SetProjectRetention sets the per-project retention override.
+	// Pass days=0 to remove the override.
+	SetProjectRetention(ctx context.Context, projectID string, days int) error
 	// Close releases the underlying resources.
 	Close() error
 }
